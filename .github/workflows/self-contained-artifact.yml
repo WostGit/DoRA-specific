@@ -3,8 +3,9 @@ name: Self-contained Lean artifact
 on:
   workflow_dispatch:
   push:
-    paths:
-      - '.github/workflows/self-contained-artifact.yml'
+    branches:
+      - main
+  pull_request:
 
 permissions:
   contents: write
@@ -12,6 +13,10 @@ permissions:
 defaults:
   run:
     shell: bash
+
+concurrency:
+  group: self-contained-artifact-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   regenerate-build-and-report:
@@ -236,7 +241,7 @@ jobs:
             echo
             echo "## Scope"
             echo
-            echo "This workflow is self-contained: it regenerates the Lean project files, builds them, writes this report, and commits the report back to the repository."
+            echo "This workflow is self-contained: it regenerates the Lean project files, builds them, writes this report, and commits the report back to the repository on non-PR runs."
             echo
             echo "This proves the small projection-bounded proof core. It does not by itself prove end-to-end neural-network behavior or empirical performance."
             echo
@@ -249,7 +254,7 @@ jobs:
           cat ARTIFACT_RESULTS.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Commit generated results back to repository
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -258,6 +263,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No generated changes to commit."
           else
-            git commit -m "Update self-contained artifact results"
+            git commit -m "Update self-contained artifact results [skip ci]"
             git push
           fi
