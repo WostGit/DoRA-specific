@@ -1,5 +1,6 @@
 import PeftSecurity
 
+#check PeftSecurity.projectionBoundsDisplacement
 #check PeftSecurity.loraProjectionBoundsDisplacement
 #check PeftSecurity.doraDisplacementDecomposition
 #check PeftSecurity.identityProjectionDisplacementEq
