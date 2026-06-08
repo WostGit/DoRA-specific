@@ -18,12 +18,12 @@ abbrev Vec (d : Nat) := Fin d -> Real
 
 /-- Squared Euclidean norm. Squared norms avoid unnecessary square-root facts. -/
 noncomputable def normSq {d : Nat} (x : Vec d) : Real :=
-  sum Finset.univ (fun i => x i * x i)
+  Finset.univ.sum (fun i : Fin d => x i * x i)
 
 /-- A nonnegative learning-rate square factor. -/
 def lrSq (eta : Real) : Real := eta * eta
 
-/-- One-step full-update squared displacement from an adversarial update signal. -/
+/-- One-step full-update squared displacement from an update signal. -/
 noncomputable def fullDisplacementSq {d : Nat} (eta : Real) (g : Vec d) : Real :=
   lrSq eta * normSq g
 
