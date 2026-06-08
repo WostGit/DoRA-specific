@@ -2,10 +2,9 @@ import Lake
 open Lake DSL
 
 package «DoRA-specific» where
-  -- Small proof-core package for artifact review.
 
 require mathlib from git
-  "https://github.com/leanprover-community/mathlib4.git" @ "master"
+  "https://github.com/leanprover-community/mathlib4.git" @ "25fc690d5a79faca0486a423d1e441ffc84e0377"
 
 lean_lib PeftSecurity where
 
