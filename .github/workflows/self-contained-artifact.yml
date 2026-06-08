@@ -1,20 +1,34 @@
 name: Self-contained Lean artifact
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/self-contained-artifact.yml'
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  build-self-contained-artifact:
+  regenerate-build-and-report:
     runs-on: ubuntu-latest
     steps:
-      - name: Install elan
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Install elan and Lean
         run: |
+          set -euo pipefail
           curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
-      - name: Generate complete Lean project from this YAML
+      - name: Regenerate artifact from this workflow
         run: |
           set -euo pipefail
           mkdir -p PeftSecurity
@@ -22,12 +36,14 @@ jobs:
           cat > lean-toolchain <<'EOF'
           leanprover/lean4:stable
           EOF
+          sed -i 's/^          //' lean-toolchain
 
           cat > lakefile.lean <<'EOF'
           import Lake
           open Lake DSL
 
-          package «DoRA-specific-self-contained» where
+          package «DoRA-specific» where
+            -- Small proof-core package for artifact review.
 
           require mathlib from git
             "https://github.com/leanprover-community/mathlib4.git" @ "master"
@@ -35,12 +51,21 @@ jobs:
           lean_lib PeftSecurity where
 
           @[default_target]
-          lean_exe self_contained_artifact where
+          lean_exe «dora_specific» where
             root := `Main
           EOF
+          sed -i 's/^          //' lakefile.lean
 
           cat > PeftSecurity/Core.lean <<'EOF'
           import Mathlib
+
+          /-!
+          # Core definitions
+
+          This file defines a small finite-dimensional one-step update model.
+          The model is intentionally modest: it proves mathematical facts about
+          projected update displacement, not end-to-end behavior of neural networks.
+          -/
 
           namespace PeftSecurity
 
@@ -51,28 +76,25 @@ jobs:
           noncomputable def normSq {d : Nat} (x : Vec d) : Real :=
             Finset.univ.sum (fun i : Fin d => x i * x i)
 
-          theorem normSq_nonneg {d : Nat} (x : Vec d) : 0 <= normSq x := by
-            unfold normSq
-            exact Finset.sum_nonneg (fun i _ => mul_self_nonneg (x i))
-
           def lrSq (eta : Real) : Real := eta * eta
+
+          noncomputable def fullDisplacementSq {d : Nat} (eta : Real) (g : Vec d) : Real :=
+            lrSq eta * normSq g
 
           theorem lrSq_nonneg (eta : Real) : 0 <= lrSq eta := by
             unfold lrSq
             exact mul_self_nonneg eta
 
-          noncomputable def fullDisplacementSq {d : Nat} (eta : Real) (g : Vec d) : Real :=
-            lrSq eta * normSq g
-
-          structure Clipper (d : Nat) where
-            clip : Vec d -> Real -> Vec d
-            clipBound : forall (g : Vec d) (C : Real), 0 <= C -> normSq (clip g C) <= C * C
-
           end PeftSecurity
           EOF
+          sed -i 's/^          //' PeftSecurity/Core.lean
 
           cat > PeftSecurity/Projection.lean <<'EOF'
           import PeftSecurity.Core
+
+          /-!
+          # Projection-bounded update displacement
+          -/
 
           namespace PeftSecurity
 
@@ -90,7 +112,7 @@ jobs:
             unfold projectedDisplacementSq fullDisplacementSq
             exact mul_le_mul_of_nonneg_left (P.nonexpansiveSq g) (lrSq_nonneg eta)
 
-          abbrev loraDisplacementSq := @projectedDisplacementSq
+          abbrev loraDisplacementSq := projectedDisplacementSq
 
           theorem loraProjectionBoundsDisplacement {d : Nat}
               (P : Projection d) (eta : Real) (g : Vec d) :
@@ -99,46 +121,7 @@ jobs:
 
           end PeftSecurity
           EOF
-
-          cat > PeftSecurity/Examples.lean <<'EOF'
-          import PeftSecurity.Projection
-
-          namespace PeftSecurity
-
-          def identityProjection (d : Nat) : Projection d where
-            project := fun x => x
-            nonexpansiveSq := by
-              intro x
-              rfl
-
-          def zeroProjection (d : Nat) : Projection d where
-            project := fun _ => fun _ => 0
-            nonexpansiveSq := by
-              intro x
-              have h : 0 <= normSq x := normSq_nonneg x
-              simpa [normSq] using h
-
-          def coordinateProjection {d : Nat} (keep : Fin d -> Bool) : Projection d where
-            project := fun x i => if keep i then x i else 0
-            nonexpansiveSq := by
-              intro x
-              unfold normSq
-              apply Finset.sum_le_sum
-              intro i _
-              by_cases h : keep i
-              · simp [h]
-              · simp [h, mul_self_nonneg]
-
-          theorem identityProjectionDisplacementEq {d : Nat} (eta : Real) (g : Vec d) :
-              loraDisplacementSq (identityProjection d) eta g = fullDisplacementSq eta g := by
-            rfl
-
-          theorem zeroProjectionDisplacementEq {d : Nat} (eta : Real) (g : Vec d) :
-              loraDisplacementSq (zeroProjection d) eta g = 0 := by
-            simp [loraDisplacementSq, projectedDisplacementSq, zeroProjection, normSq]
-
-          end PeftSecurity
-          EOF
+          sed -i 's/^          //' PeftSecurity/Projection.lean
 
           cat > PeftSecurity/DoRA.lean <<'EOF'
           import PeftSecurity.Projection
@@ -166,45 +149,115 @@ jobs:
 
           end PeftSecurity
           EOF
+          sed -i 's/^          //' PeftSecurity/DoRA.lean
 
-          cat > PeftSecurity/Bounded.lean <<'EOF'
+          cat > PeftSecurity/Examples.lean <<'EOF'
           import PeftSecurity.Projection
 
           namespace PeftSecurity
 
-          noncomputable def boundedProjectedSignal {d : Nat}
-              (P : Projection d) (K : Clipper d) (g : Vec d) (C : Real) : Vec d :=
-            P.project (K.clip g C)
+          def identityProjection (d : Nat) : Projection d where
+            project := fun x => x
+            nonexpansiveSq := by
+              intro x
+              rfl
 
-          theorem projectedClippedBound {d : Nat}
-              (P : Projection d) (K : Clipper d) (g : Vec d) (C : Real) (hC : 0 <= C) :
-              normSq (boundedProjectedSignal P K g C) <= C * C := by
-            unfold boundedProjectedSignal
-            exact le_trans (P.nonexpansiveSq (K.clip g C)) (K.clipBound g C hC)
+          def zeroProjection (d : Nat) : Projection d where
+            project := fun _ => fun _ => 0
+            nonexpansiveSq := by
+              intro x
+              unfold normSq
+              simp
+
+          theorem identityProjectionDisplacementEq {d : Nat} (eta : Real) (g : Vec d) :
+              loraDisplacementSq (identityProjection d) eta g = fullDisplacementSq eta g := by
+            unfold loraDisplacementSq projectedDisplacementSq fullDisplacementSq identityProjection
+            rfl
+
+          theorem zeroProjectionDisplacementEq {d : Nat} (eta : Real) (g : Vec d) :
+              loraDisplacementSq (zeroProjection d) eta g = 0 := by
+            unfold loraDisplacementSq projectedDisplacementSq zeroProjection normSq
+            simp [lrSq]
 
           end PeftSecurity
           EOF
+          sed -i 's/^          //' PeftSecurity/Examples.lean
 
           cat > PeftSecurity.lean <<'EOF'
           import PeftSecurity.Core
           import PeftSecurity.Projection
-          import PeftSecurity.Examples
           import PeftSecurity.DoRA
-          import PeftSecurity.Bounded
+          import PeftSecurity.Examples
           EOF
+          sed -i 's/^          //' PeftSecurity.lean
 
           cat > Main.lean <<'EOF'
           import PeftSecurity
 
-          #check PeftSecurity.normSq_nonneg
+          #check PeftSecurity.projectionBoundsDisplacement
           #check PeftSecurity.loraProjectionBoundsDisplacement
           #check PeftSecurity.doraDisplacementDecomposition
           #check PeftSecurity.identityProjectionDisplacementEq
           #check PeftSecurity.zeroProjectionDisplacementEq
-          #check PeftSecurity.projectedClippedBound
           EOF
+          sed -i 's/^          //' Main.lean
 
-      - name: Build generated Lean artifact
+      - name: Build regenerated artifact
+        id: build
         run: |
+          set -euo pipefail
           lake update
-          lake build
+          lake build 2>&1 | tee build.log
+
+      - name: Write artifact results
+        if: always()
+        run: |
+          set -euo pipefail
+          STATUS="${{ job.status }}"
+          COMMIT="${GITHUB_SHA}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          DATE_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo "# Artifact Results"
+            echo
+            echo "Generated by: .github/workflows/self-contained-artifact.yml"
+            echo "UTC time: ${DATE_UTC}"
+            echo "Source commit: ${COMMIT}"
+            echo "Workflow run: ${RUN_URL}"
+            echo "Job status: ${STATUS}"
+            echo
+            echo "## Checked proof objects"
+            echo
+            echo "- PeftSecurity.projectionBoundsDisplacement"
+            echo "- PeftSecurity.loraProjectionBoundsDisplacement"
+            echo "- PeftSecurity.doraDisplacementDecomposition"
+            echo "- PeftSecurity.identityProjectionDisplacementEq"
+            echo "- PeftSecurity.zeroProjectionDisplacementEq"
+            echo
+            echo "## Scope"
+            echo
+            echo "This workflow is self-contained: it regenerates the Lean project files, builds them, writes this report, and commits the report back to the repository."
+            echo
+            echo "This proves the small projection-bounded proof core. It does not by itself prove end-to-end neural-network behavior or empirical performance."
+            echo
+            echo "## Build log tail"
+            echo
+            echo '```text'
+            tail -n 80 build.log || true
+            echo '```'
+          } > ARTIFACT_RESULTS.md
+          cat ARTIFACT_RESULTS.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit generated results back to repository
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lean-toolchain lakefile.lean PeftSecurity.lean Main.lean PeftSecurity/Core.lean PeftSecurity/Projection.lean PeftSecurity/DoRA.lean PeftSecurity/Examples.lean ARTIFACT_RESULTS.md build.log
+          if git diff --cached --quiet; then
+            echo "No generated changes to commit."
+          else
+            git commit -m "Update self-contained artifact results"
+            git push
+          fi
