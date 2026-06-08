@@ -1,0 +1,210 @@
+name: Self-contained Lean artifact
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-self-contained-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install elan
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Generate complete Lean project from this YAML
+        run: |
+          set -euo pipefail
+          mkdir -p PeftSecurity
+
+          cat > lean-toolchain <<'EOF'
+          leanprover/lean4:stable
+          EOF
+
+          cat > lakefile.lean <<'EOF'
+          import Lake
+          open Lake DSL
+
+          package «DoRA-specific-self-contained» where
+
+          require mathlib from git
+            "https://github.com/leanprover-community/mathlib4.git" @ "master"
+
+          lean_lib PeftSecurity where
+
+          @[default_target]
+          lean_exe self_contained_artifact where
+            root := `Main
+          EOF
+
+          cat > PeftSecurity/Core.lean <<'EOF'
+          import Mathlib
+
+          namespace PeftSecurity
+
+          open scoped BigOperators
+
+          abbrev Vec (d : Nat) := Fin d -> Real
+
+          noncomputable def normSq {d : Nat} (x : Vec d) : Real :=
+            Finset.univ.sum (fun i : Fin d => x i * x i)
+
+          theorem normSq_nonneg {d : Nat} (x : Vec d) : 0 <= normSq x := by
+            unfold normSq
+            exact Finset.sum_nonneg (fun i _ => mul_self_nonneg (x i))
+
+          def lrSq (eta : Real) : Real := eta * eta
+
+          theorem lrSq_nonneg (eta : Real) : 0 <= lrSq eta := by
+            unfold lrSq
+            exact mul_self_nonneg eta
+
+          noncomputable def fullDisplacementSq {d : Nat} (eta : Real) (g : Vec d) : Real :=
+            lrSq eta * normSq g
+
+          structure Clipper (d : Nat) where
+            clip : Vec d -> Real -> Vec d
+            clipBound : forall (g : Vec d) (C : Real), 0 <= C -> normSq (clip g C) <= C * C
+
+          end PeftSecurity
+          EOF
+
+          cat > PeftSecurity/Projection.lean <<'EOF'
+          import PeftSecurity.Core
+
+          namespace PeftSecurity
+
+          structure Projection (d : Nat) where
+            project : Vec d -> Vec d
+            nonexpansiveSq : forall x : Vec d, normSq (project x) <= normSq x
+
+          noncomputable def projectedDisplacementSq {d : Nat}
+              (P : Projection d) (eta : Real) (g : Vec d) : Real :=
+            lrSq eta * normSq (P.project g)
+
+          theorem projectionBoundsDisplacement {d : Nat}
+              (P : Projection d) (eta : Real) (g : Vec d) :
+              projectedDisplacementSq P eta g <= fullDisplacementSq eta g := by
+            unfold projectedDisplacementSq fullDisplacementSq
+            exact mul_le_mul_of_nonneg_left (P.nonexpansiveSq g) (lrSq_nonneg eta)
+
+          abbrev loraDisplacementSq := @projectedDisplacementSq
+
+          theorem loraProjectionBoundsDisplacement {d : Nat}
+              (P : Projection d) (eta : Real) (g : Vec d) :
+              loraDisplacementSq P eta g <= fullDisplacementSq eta g := by
+            exact projectionBoundsDisplacement P eta g
+
+          end PeftSecurity
+          EOF
+
+          cat > PeftSecurity/Examples.lean <<'EOF'
+          import PeftSecurity.Projection
+
+          namespace PeftSecurity
+
+          def identityProjection (d : Nat) : Projection d where
+            project := fun x => x
+            nonexpansiveSq := by
+              intro x
+              rfl
+
+          def zeroProjection (d : Nat) : Projection d where
+            project := fun _ => fun _ => 0
+            nonexpansiveSq := by
+              intro x
+              have h : 0 <= normSq x := normSq_nonneg x
+              simpa [normSq] using h
+
+          def coordinateProjection {d : Nat} (keep : Fin d -> Bool) : Projection d where
+            project := fun x i => if keep i then x i else 0
+            nonexpansiveSq := by
+              intro x
+              unfold normSq
+              apply Finset.sum_le_sum
+              intro i _
+              by_cases h : keep i
+              · simp [h]
+              · simp [h, mul_self_nonneg]
+
+          theorem identityProjectionDisplacementEq {d : Nat} (eta : Real) (g : Vec d) :
+              loraDisplacementSq (identityProjection d) eta g = fullDisplacementSq eta g := by
+            rfl
+
+          theorem zeroProjectionDisplacementEq {d : Nat} (eta : Real) (g : Vec d) :
+              loraDisplacementSq (zeroProjection d) eta g = 0 := by
+            simp [loraDisplacementSq, projectedDisplacementSq, zeroProjection, normSq]
+
+          end PeftSecurity
+          EOF
+
+          cat > PeftSecurity/DoRA.lean <<'EOF'
+          import PeftSecurity.Projection
+
+          namespace PeftSecurity
+
+          noncomputable def doraDisplacementBoundSq {d : Nat}
+              (P : Projection d) (eta : Real)
+              (directionSignal magnitudeSignal : Vec d) : Real :=
+            loraDisplacementSq P eta directionSignal + fullDisplacementSq eta magnitudeSignal
+
+          def BoundedMagnitudeChannelSq {d : Nat}
+              (eta beta : Real) (magnitudeSignal referenceSignal : Vec d) : Prop :=
+            fullDisplacementSq eta magnitudeSignal <= beta * fullDisplacementSq eta referenceSignal
+
+          theorem doraDisplacementDecomposition {d : Nat}
+              (P : Projection d) (eta beta : Real)
+              (directionSignal magnitudeSignal referenceSignal : Vec d)
+              (hMag : BoundedMagnitudeChannelSq eta beta magnitudeSignal referenceSignal) :
+              doraDisplacementBoundSq P eta directionSignal magnitudeSignal <=
+                fullDisplacementSq eta directionSignal +
+                beta * fullDisplacementSq eta referenceSignal := by
+            unfold doraDisplacementBoundSq BoundedMagnitudeChannelSq at *
+            exact add_le_add (loraProjectionBoundsDisplacement P eta directionSignal) hMag
+
+          end PeftSecurity
+          EOF
+
+          cat > PeftSecurity/Bounded.lean <<'EOF'
+          import PeftSecurity.Projection
+
+          namespace PeftSecurity
+
+          noncomputable def boundedProjectedSignal {d : Nat}
+              (P : Projection d) (K : Clipper d) (g : Vec d) (C : Real) : Vec d :=
+            P.project (K.clip g C)
+
+          theorem projectedClippedBound {d : Nat}
+              (P : Projection d) (K : Clipper d) (g : Vec d) (C : Real) (hC : 0 <= C) :
+              normSq (boundedProjectedSignal P K g C) <= C * C := by
+            unfold boundedProjectedSignal
+            exact le_trans (P.nonexpansiveSq (K.clip g C)) (K.clipBound g C hC)
+
+          end PeftSecurity
+          EOF
+
+          cat > PeftSecurity.lean <<'EOF'
+          import PeftSecurity.Core
+          import PeftSecurity.Projection
+          import PeftSecurity.Examples
+          import PeftSecurity.DoRA
+          import PeftSecurity.Bounded
+          EOF
+
+          cat > Main.lean <<'EOF'
+          import PeftSecurity
+
+          #check PeftSecurity.normSq_nonneg
+          #check PeftSecurity.loraProjectionBoundsDisplacement
+          #check PeftSecurity.doraDisplacementDecomposition
+          #check PeftSecurity.identityProjectionDisplacementEq
+          #check PeftSecurity.zeroProjectionDisplacementEq
+          #check PeftSecurity.projectedClippedBound
+          EOF
+
+      - name: Build generated Lean artifact
+        run: |
+          lake update
+          lake build
