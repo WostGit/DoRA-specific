@@ -212,6 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           lake update
+          lake exe cache get
           lake build 2>&1 | tee build.log
 
       - name: Write artifact results
